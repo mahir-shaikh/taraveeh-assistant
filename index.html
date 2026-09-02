@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=600, height=600, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>Taraveeh Assistant</title>
+
+<!--
+  =============================================================================
+  TARAVEEH ASSISTANT
+  Hands-free congregational prayer companion for Meta Ray-Ban Display glasses
+  (600x600 in-lens heads-up display). Single-file, zero-dependency build.
+
+  HOW TO TUNE THIS FILE (search these tags):
+    [TUNE:TEXT-SIZE]     -> font sizes for Arabic verse / labels / status
+    [TUNE:PITCH]         -> Ruku/Sujood pitch threshold (degrees)
+    [TUNE:PHONETICS]     -> keyword phonetic variants (Ameen / Allahu Akbar)
+    [TUNE:API-HOOK]      -> where to wire in OpenAI Realtime / Tarteel / etc.
+    [TUNE:VERSES]        -> placeholder Quran data feed
+  =============================================================================
+-->
+
+<style>
+  /* ---------------------------------------------------------------------
+     ROOT / THEME
+     High-contrast pure-black background, crisp white + gold accents to
+     minimize lens glare and maximize legibility through the HUD optics.
+  --------------------------------------------------------------------- */
+  :root {
+    --bg-color: #000000;
+    --text-color: #f5f5f5;
+    --accent-gold: #d4af37;
+    --dim-gray: #8a8a8a;
+    --danger-red: #b33;
+
+    /* [TUNE:TEXT-SIZE] Adjust these to taste for legibility on the HUD */
+    --font-size-status: 20px;
+    --font-size-label: 22px;
+    --font-size-verse-ar: 44px;
+    --font-size-verse-translit: 22px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #101010; /* backdrop behind the 600x600 square when previewing on a phone browser */
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, "Segoe UI", Tahoma, Arial, sans-serif;
+  }
+
+  /* ---------------------------------------------------------------------
+     APP CONTAINER — fixed 600x600 to match the glasses' lens display.
+     On a phone browser this renders as a centered square "preview" of
+     what the HUD would show.
+  --------------------------------------------------------------------- */
+  #app {
+    position: relative;
+    width: 600px;
+    height: 600px;
+    max-width: 100vw;
+    max-height: 100vw;
+    background: var(--bg-color);
+    color: var(--text-color);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* ---------------------------------------------------------------------
+     START OVERLAY — iOS Safari requires a user gesture (tap) before it
+     will grant microphone access or device-orientation (motion) access.
+     This gate collects both permissions up front in one tap.
+  --------------------------------------------------------------------- */
+  #start-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: var(--bg-color);
+    text-align: center;
+    padding: 40px;
+  }
+
+  #start-overlay.hidden { display: none; }
+
+  #start-overlay h1 {
+    font-size: 26px;
+    margin: 0;
+    color: var(--accent-gold);
+    letter-spacing: 0.5px;
+  }
+
+  #start-overlay p {
+    font-size: 15px;
+    color: var(--dim-gray);
+    margin: 0;
+    max-width: 420px;
+    line-height: 1.4;
+  }
+
+  #start-btn {
+    margin-top: 10px;
+    padding: 14px 36px;
+    font-size: 18px;
+    font-weight: 600;
+    background: var(--accent-gold);
+    color: #000;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+
+  #start-btn:active { opacity: 0.8; }
+
+  #permission-error {
+    color: var(--danger-red);
+    font-size: 13px;
+    max-width: 420px;
+    display: none;
+  }
+
+  /* ---------------------------------------------------------------------
+     STATUS BAR — top strip: current state + mic activity dot.
+  --------------------------------------------------------------------- */
+  #status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 18px 10px 6px;
+    font-size: var(--font-size-status);
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--dim-gray);
+    flex-shrink: 0;
+  }
+
+  #status-text.state-idle   { color: var(--dim-gray); }
+  #status-text.state-active { color: var(--accent-gold); }
+  #status-text.state-sujood { color: var(--text-color); }
+
+  #mic-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--dim-gray);
+    transition: background 0.15s linear;
+  }
+  #mic-dot.live {
+    background: #3ddc5a;
+    box-shadow: 0 0 6px #3ddc5a;
+  }
+
+  /* ---------------------------------------------------------------------
+     TRACKING LABEL — current Surah / Ayah readout.
+  --------------------------------------------------------------------- */
+  #tracking-label {
+    text-align: center;
+    font-size: var(--font-size-label);
+    color: var(--accent-gold);
+    padding: 4px 10px 10px;
+    flex-shrink: 0;
+    min-height: 28px;
+  }
+
+  /* ---------------------------------------------------------------------
+     VERSE DISPLAY — main content area. This is the element that gets
+     blanked instantly during Ruku / Sujood (see [TUNE:PITCH] in JS).
+  --------------------------------------------------------------------- */
+  #verse-display {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 34px;
+    text-align: center;
+    /* Instant show/hide — no fade, so it disappears the moment the head drops */
+    transition: none;
+  }
+
+  #verse-display.blanked {
+    opacity: 0;
+    visibility: hidden;
+  }
+
+  #verse-text-ar {
+    font-size: var(--font-size-verse-ar);
+    line-height: 1.7;
+    direction: rtl;
+    font-family: "Scheherazade New", "Traditional Arabic", serif;
+    margin: 0 0 14px 0;
+  }
+
+  #verse-text-translit {
+    font-size: var(--font-size-verse-translit);
+    color: var(--dim-gray);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  /* ---------------------------------------------------------------------
+     IDLE READY CUE — minimal glyph shown only while IDLE.
+  --------------------------------------------------------------------- */
+  #idle-cue {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    color: var(--dim-gray);
+  }
+  #idle-cue .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--dim-gray);
+  }
+  #idle-cue span { font-size: 16px; letter-spacing: 1px; }
+
+  /* ---------------------------------------------------------------------
+     DEBUG READOUT — optional live pitch angle, useful while calibrating
+     the [TUNE:PITCH] threshold. Toggle via DEBUG_MODE in JS.
+  --------------------------------------------------------------------- */
+  #debug-readout {
+    position: absolute;
+    bottom: 6px;
+    right: 10px;
+    font-size: 12px;
+    color: #444;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- Permission gate: must be satisfied by a real tap on iOS Safari -->
+  <div id="start-overlay">
+    <h1>Taraveeh Assistant</h1>
+    <p>
+      Tap once to enable the microphone and motion sensors. The app will
+      then stay silent and dormant until it hears "Ameen", and will go
+      back to sleep the instant it hears "Allahu Akbar".
+    </p>
+    <button id="start-btn">Tap to Begin</button>
+    <p id="permission-error"></p>
+  </div>
+
+  <header id="status-bar">
+    <span id="mic-dot"></span>
+    <span id="status-text" class="state-idle">Idle</span>
+  </header>
+
+  <div id="tracking-label"></div>
+
+  <main id="verse-display">
+    <div id="idle-cue">
+      <div class="dot"></div>
+      <span>READY — LISTENING FOR "AMEEN"</span>
+    </div>
+    <div id="verse-content" style="display:none;">
+      <p id="verse-text-ar"></p>
+      <p id="verse-text-translit"></p>
+    </div>
+  </main>
+
+  <div id="debug-readout"></div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* =========================================================================
+     CONFIG — tune everything here
+  ========================================================================= */
+
+  // Show the live pitch-angle debug readout in the bottom-right corner.
+  var DEBUG_MODE = false;
+
+  // [TUNE:PITCH] Degrees of forward head-tilt (deviceorientation "beta")
+  // beyond which we consider the wearer to be in Ruku/Sujood and blank
+  // the screen. Standing upright ~= 0deg beta (varies per device mount).
+  // Increase this if the screen blanks too early during normal standing
+  // posture; decrease it if it doesn't blank soon enough during bowing.
+  var PITCH_BLANK_THRESHOLD_DEG = 45;
+
+  // Hysteresis so the screen doesn't flicker right at the threshold edge.
+  // Screen re-appears once beta drops back below (threshold - margin).
+  var PITCH_HYSTERESIS_DEG = 8;
+
+  // [TUNE:PHONETICS] Phonetic match lists for the two control keywords.
+  // Speech recognition transcripts are lowercased and diacritic-stripped
+  // before being checked against these substrings. Add more variants
+  // here if your users' accents produce different transliterations.
+  var ACTIVATE_PATTERNS = [
+    "ameen", "amin", "aameen", "aamin",
+    "amen", "aamen", "amiin", // common English-recognizer spellings of the same sound
+    "آمين", "امين"
+  ];
+
+  // Full phrases are checked immediately (interim results included) since
+  // they're distinctive enough to be safe. The short/generic fallback word
+  // is only checked once DEACTIVATE_FALLBACK_GRACE_MS has passed since
+  // entering ACTIVE state, so a stray noisy transcript right after
+  // activation can't immediately bounce the app back to idle.
+  var DEACTIVATE_PATTERNS_FULL = [
+    "allahu akbar", "allahuakbar", "allah akbar", "allahu akbr",
+    "الله أكبر", "الله اكبر", "اللهاكبر"
+  ];
+  var DEACTIVATE_PATTERNS_FALLBACK = [
+    "akbar", "akbr", "akber", // "Allahu" is often dropped/garbled by the recognizer — "akbar" alone is distinctive enough to be a safe fallback
+    "اكبر"
+  ];
+  var DEACTIVATE_FALLBACK_GRACE_MS = 2500;
+
+  // Both control phrases are Arabic ("Ameen"/"آمين", "Allahu Akbar"), and
+  // in real-world testing the en-US model consistently mangled "Ameen"
+  // into "I mean"/"um" while ar-SA caught both phrases cleanly. So ar-SA
+  // is the default language, with an occasional off-cycle pass in en-US
+  // kept only as secondary coverage for a more English-accented speaker.
+  var LANG_SEQUENCE = ["ar-SA", "ar-SA", "en-US"];
+
+  // How often (ms) to force a language-cycle restart, rather than waiting
+  // on the browser's own silence-timeout restart (which can leave the
+  // recognizer stuck on one pass of the sequence for an unpredictable time).
+  var RECOGNITION_CYCLE_MS = 6000;
+
+  // Cooldown after a state transition, so the tail end of a phrase
+  // ("...akbar") can't immediately re-trigger the same transition again.
+  var TRANSITION_COOLDOWN_MS = 3000;
+
+  /* =========================================================================
+     STATE MACHINE
+     APP_STATE.IDLE   -> sensors dormant, screen shows minimal ready cue
+     APP_STATE.ACTIVE -> IMU + audio pipeline live, verses shown/blanked
+                         depending on posture (see handleOrientation)
+  ========================================================================= */
+
+  var APP_STATE = { IDLE: "IDLE", ACTIVE: "ACTIVE" };
+  var appState = APP_STATE.IDLE;
+  var isBlanked = false;          // true while in Ruku/Sujood posture
+  var lastTransitionAt = 0;
+  var activeStateEnteredAt = 0;
+
+  /* =========================================================================
+     DOM REFS
+  ========================================================================= */
+
+  var elStartOverlay   = document.getElementById("start-overlay");
+  var elStartBtn       = document.getElementById("start-btn");
+  var elPermissionErr  = document.getElementById("permission-error");
+  var elStatusText     = document.getElementById("status-text");
+  var elMicDot         = document.getElementById("mic-dot");
+  var elTrackingLabel  = document.getElementById("tracking-label");
+  var elVerseDisplay   = document.getElementById("verse-display");
+  var elIdleCue        = document.getElementById("idle-cue");
+  var elVerseContent   = document.getElementById("verse-content");
+  var elVerseAr        = document.getElementById("verse-text-ar");
+  var elVerseTranslit  = document.getElementById("verse-text-translit");
+  var elDebug          = document.getElementById("debug-readout");
+
+  if (DEBUG_MODE) elDebug.style.display = "block";
+
+  /* =========================================================================
+     [TUNE:VERSES] Placeholder Quran feed.
+     Replace this with whatever your real-time recitation-matching engine
+     (see [TUNE:API-HOOK] below) reports as the imam's current position.
+     For this boilerplate we just cycle through a tiny local sample so the
+     UI has something to render while ACTIVE.
+  ========================================================================= */
+
+  var SAMPLE_VERSES = [
+    {
+      surah: "Al-Fatiha", ayah: "1",
+      ar: "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
+      translit: "Bismillahi r-Rahmani r-Rahim"
+    },
+    {
+      surah: "Al-Fatiha", ayah: "2",
+      ar: "الْحَمْدُ لِلَّهِ رَبِّ الْعَالَمِينَ",
+      translit: "Alhamdu lillahi Rabbi l-'alamin"
+    },
+    {
+      surah: "Al-Ikhlas", ayah: "1",
+      ar: "قُلْ هُوَ اللَّهُ أَحَدٌ",
+      translit: "Qul huwa Allahu ahad"
+    }
+  ];
+  var sampleVerseIndex = 0;
+  var verseRotationTimer = null;
+
+  function renderVerse(verse) {
+    elTrackingLabel.textContent = "Surah " + verse.surah + " • Ayah " + verse.ayah;
+    elVerseAr.textContent = verse.ar;
+    elVerseTranslit.textContent = verse.translit;
+  }
+
+  function startVerseRotationDemo() {
+    // Demo-only ticker. Delete this once real verse updates are driven by
+    // the recitation-matching API hook below.
+    renderVerse(SAMPLE_VERSES[sampleVerseIndex]);
+    verseRotationTimer = setInterval(function () {
+      sampleVerseIndex = (sampleVerseIndex + 1) % SAMPLE_VERSES.length;
+      renderVerse(SAMPLE_VERSES[sampleVerseIndex]);
+    }, 8000);
+  }
+
+  function stopVerseRotationDemo() {
+    if (verseRotationTimer) {
+      clearInterval(verseRotationTimer);
+      verseRotationTimer = null;
+    }
+    elTrackingLabel.textContent = "";
+    elVerseAr.textContent = "";
+    elVerseTranslit.textContent = "";
+  }
+
+  /* =========================================================================
+     UI HELPERS
+  ========================================================================= */
+
+  function setStatusUI(label, cssClass) {
+    elStatusText.textContent = label;
+    elStatusText.className = cssClass;
+  }
+
+  function showIdleUI() {
+    elIdleCue.style.display = "flex";
+    elVerseContent.style.display = "none";
+    elVerseDisplay.classList.remove("blanked");
+    setStatusUI("Idle", "state-idle");
+  }
+
+  function showActiveUI() {
+    elIdleCue.style.display = "none";
+    elVerseContent.style.display = "block";
+    elVerseDisplay.classList.remove("blanked");
+    setStatusUI("Listening", "state-active");
+  }
+
+  function showSujoodUI() {
+    setStatusUI("Sujood Mode", "state-sujood");
+    elVerseDisplay.classList.add("blanked");
+  }
+
+  function clearSujoodUI() {
+    setStatusUI("Listening", "state-active");
+    elVerseDisplay.classList.remove("blanked");
+  }
+
+  /* =========================================================================
+     MOTION TRACKING (IMU) — deviceorientation / pitch ("beta")
+     Only attached while ACTIVE. beta ~ 0 when the phone/glasses are
+     upright/vertical, and increases as the wearer's head tilts forward
+     and down (Ruku / Sujood).
+  ========================================================================= */
+
+  function handleOrientation(event) {
+    var beta = event.beta; // degrees, front-to-back tilt
+    if (beta === null || beta === undefined) return;
+
+    if (DEBUG_MODE) {
+      elDebug.textContent = "beta: " + beta.toFixed(1) + "deg";
+    }
+
+    if (!isBlanked && beta > PITCH_BLANK_THRESHOLD_DEG) {
+      // Head has dropped sharply forward/down -> Ruku or Sujood.
+      isBlanked = true;
+      showSujoodUI();
+    } else if (isBlanked && beta < (PITCH_BLANK_THRESHOLD_DEG - PITCH_HYSTERESIS_DEG)) {
+      // Head has returned to a roughly horizontal/upright (Qiyam) posture.
+      isBlanked = false;
+      clearSujoodUI();
+    }
+  }
+
+  function attachMotionListeners() {
+    window.addEventListener("deviceorientation", handleOrientation, true);
+  }
+
+  function removeMotionListeners() {
+    window.removeEventListener("deviceorientation", handleOrientation, true);
+    isBlanked = false;
+  }
+
+  /* =========================================================================
+     AUDIO PIPELINE — AudioContext + getUserMedia
+     This runs only while ACTIVE. It is deliberately separate from the
+     SpeechRecognition instance below (which only listens for the two
+     control keywords) — this pipeline is the raw audio feed you hand to
+     an external recitation-matching service.
+  ========================================================================= */
+
+  var micStream = null;          // MediaStream, kept alive across the whole session
+  var audioContext = null;
+  var audioSourceNode = null;
+  var audioProcessorNode = null;
+
+  function requestMicStream() {
+    return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      micStream = stream;
+      return stream;
+    });
+  }
+
+  function startAudioPipeline() {
+    if (!micStream) return; // permission was not granted at start-up
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    audioSourceNode = audioContext.createMediaStreamSource(micStream);
+
+    // ScriptProcessorNode is deprecated but kept here for maximum boilerplate
+    // portability. For production, replace this with an AudioWorkletNode.
+    audioProcessorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+    audioProcessorNode.onaudioprocess = function (audioEvent) {
+      var inputBuffer = audioEvent.inputBuffer.getChannelData(0);
+
+      /* -----------------------------------------------------------------
+         [TUNE:API-HOOK] Real-time Quran recitation matching.
+         `inputBuffer` is a Float32Array of raw PCM samples for this
+         4096-sample chunk (audioContext.sampleRate, mono). Wire it up to
+         your external cloud service here, e.g.:
+
+           - OpenAI Realtime API (WebRTC/WebSocket): send this chunk over
+             the already-open data channel / socket as PCM16 or base64.
+           - Tarteel AI recitation-matching API: forward the buffer (or
+             batch a few chunks) to their streaming endpoint.
+
+         Example skeleton:
+
+           sendAudioChunkToExternalAPI(inputBuffer, audioContext.sampleRate);
+
+         and update `renderVerse(...)` / elTrackingLabel above when the
+         service reports the imam's current Surah/Ayah position.
+      ----------------------------------------------------------------- */
+      // sendAudioChunkToExternalAPI(inputBuffer, audioContext.sampleRate);
+    };
+
+    audioSourceNode.connect(audioProcessorNode);
+    audioProcessorNode.connect(audioContext.destination === audioContext.destination
+      ? audioContext.destination : audioContext.destination);
+    // Note: connecting to destination is only required so the processor
+    // node stays alive in all browsers; we never actually play the audio
+    // back out loud (that would cause feedback into the mic).
+  }
+
+  function stopAudioPipeline() {
+    if (audioProcessorNode) {
+      audioProcessorNode.disconnect();
+      audioProcessorNode.onaudioprocess = null;
+      audioProcessorNode = null;
+    }
+    if (audioSourceNode) {
+      audioSourceNode.disconnect();
+      audioSourceNode = null;
+    }
+    if (audioContext) {
+      audioContext.close();
+      audioContext = null;
+    }
+    // Fully stop the mic tracks on deactivation per spec ("disconnect
+    // audio streams"). A fresh getUserMedia call on the next activation
+    // will not re-prompt since permission was already granted this
+    // session.
+    if (micStream) {
+      micStream.getTracks().forEach(function (track) { track.stop(); });
+      micStream = null;
+    }
+  }
+
+  /* =========================================================================
+     SPEECH RECOGNITION — always-on keyword listener
+     Runs continuously in both IDLE and ACTIVE states so the app can hear
+     "Ameen" to wake up and "Allahu Akbar" to go back to sleep.
+  ========================================================================= */
+
+  var SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var recognizer = null;
+  var langSequenceIndex = 0;
+  var lastUsedLang = "ar-SA";
+  var recognizerShouldRun = false; // guards against restart-after-intentional-stop
+
+  // Picks the next language tag from LANG_SEQUENCE, advancing the shared
+  // index so each restart cycles through it.
+  function getNextLang() {
+    var lang = LANG_SEQUENCE[langSequenceIndex % LANG_SEQUENCE.length];
+    langSequenceIndex++;
+    lastUsedLang = lang;
+    return lang;
+  }
+
+  function normalizeTranscript(text) {
+    return text
+      .toLowerCase()
+      .normalize("NFKD")
+      // strip Arabic tashkeel/diacritics and Latin combining marks
+      .replace(/[̀-ًͯ-ٰٟ]/g, "")
+      .trim();
+  }
+
+  function transcriptMatches(transcript, patterns) {
+    for (var i = 0; i < patterns.length; i++) {
+      if (transcript.indexOf(patterns[i]) !== -1) return true;
+    }
+    return false;
+  }
+
+  function onSpeechResult(event) {
+    for (var i = event.resultIndex; i < event.results.length; i++) {
+      var raw = event.results[i][0].transcript;
+      var transcript = normalizeTranscript(raw);
+      var now = Date.now();
+      var inCooldown = (now - lastTransitionAt) < TRANSITION_COOLDOWN_MS;
+
+      // Log every heard phrase — check the browser console to see exactly
+      // what the recognizer transcribed (and which language it was using)
+      // if a keyword isn't triggering.
+      console.log(
+        "[speech]", event.results[i].isFinal ? "final" : "interim",
+        "lang:", lastUsedLang,
+        "raw:", JSON.stringify(raw), "normalized:", JSON.stringify(transcript)
+      );
+
+      if (inCooldown) continue;
+
+      if (appState === APP_STATE.IDLE) {
+        if (transcriptMatches(transcript, ACTIVATE_PATTERNS)) {
+          lastTransitionAt = now;
+          enterActiveState();
+          break;
+        }
+      }
+
+      if (appState === APP_STATE.ACTIVE) {
+        var pastGracePeriod = (now - activeStateEnteredAt) > DEACTIVATE_FALLBACK_GRACE_MS;
+        var deactivated =
+          transcriptMatches(transcript, DEACTIVATE_PATTERNS_FULL) ||
+          (pastGracePeriod && transcriptMatches(transcript, DEACTIVATE_PATTERNS_FALLBACK));
+        if (deactivated) {
+          lastTransitionAt = now;
+          exitActiveState();
+          break;
+        }
+      }
+    }
+  }
+
+  var isSpeaking = false;        // true between onspeechstart/onspeechend
+  var cycleRestartPending = false; // a forced restart was due while mid-utterance
+
+  function buildRecognizer() {
+    var r = new SpeechRecognitionImpl();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = getNextLang();
+
+    r.onresult = onSpeechResult;
+
+    r.onstart = function () {
+      elMicDot.classList.add("live");
+    };
+
+    // Track whether the user is mid-utterance so the forced language-cycle
+    // restart (below) never cuts a word off right as it's being spoken.
+    r.onspeechstart = function () { isSpeaking = true; };
+    r.onspeechend = function () {
+      isSpeaking = false;
+      if (cycleRestartPending) {
+        cycleRestartPending = false;
+        try { r.stop(); } catch (e) { /* already stopping */ }
+      }
+    };
+
+    r.onend = function () {
+      elMicDot.classList.remove("live");
+      if (!recognizerShouldRun) return;
+      // Continuous recognition times out periodically in most browsers —
+      // restart automatically, advancing through LANG_SEQUENCE.
+      recognizer = buildRecognizer();
+      try { recognizer.start(); } catch (e) { /* already starting elsewhere */ }
+    };
+
+    r.onerror = function (err) {
+      // "no-speech" and "aborted" are routine — the onend handler above
+      // will restart the recognizer. Anything else is logged for debugging.
+      if (err.error !== "no-speech" && err.error !== "aborted") {
+        console.warn("SpeechRecognition error:", err.error);
+      }
+    };
+
+    return r;
+  }
+
+  var recognitionCycleTimer = null;
+
+  function startSpeechRecognition() {
+    if (!SpeechRecognitionImpl) {
+      elPermissionErr.textContent =
+        "This browser does not support the Web Speech API. Try Safari on iOS 14.5+ or Chrome.";
+      elPermissionErr.style.display = "block";
+      return;
+    }
+    recognizerShouldRun = true;
+    recognizer = buildRecognizer();
+    recognizer.start();
+
+    // Force a restart on a fixed cadence so LANG_SEQUENCE actually cycles
+    // in a predictable window, instead of waiting on however
+    // long the browser decides to keep a continuous session open before
+    // firing its own "onend". If the user is mid-utterance when this
+    // fires, defer the restart until onspeechend so we never cut a
+    // keyword off half-said.
+    recognitionCycleTimer = setInterval(function () {
+      if (!recognizer) return;
+      if (isSpeaking) {
+        cycleRestartPending = true;
+        return;
+      }
+      try { recognizer.stop(); } catch (e) { /* already stopping */ }
+    }, RECOGNITION_CYCLE_MS);
+  }
+
+  function stopSpeechRecognitionPermanently() {
+    recognizerShouldRun = false;
+    if (recognitionCycleTimer) {
+      clearInterval(recognitionCycleTimer);
+      recognitionCycleTimer = null;
+    }
+    if (recognizer) {
+      recognizer.onend = null;
+      recognizer.stop();
+      recognizer = null;
+    }
+  }
+
+  /* =========================================================================
+     STATE TRANSITIONS
+  ========================================================================= */
+
+  function enterActiveState() {
+    appState = APP_STATE.ACTIVE;
+    activeStateEnteredAt = Date.now();
+    attachMotionListeners();
+    startAudioPipeline();
+    showActiveUI();
+    startVerseRotationDemo(); // demo-only — replace with real API-driven updates
+  }
+
+  function exitActiveState() {
+    appState = APP_STATE.IDLE;
+    removeMotionListeners();
+    stopAudioPipeline();
+    stopVerseRotationDemo();
+    showIdleUI();
+  }
+
+  /* =========================================================================
+     PERMISSION GATE (must be triggered by a real user tap on iOS Safari)
+  ========================================================================= */
+
+  function requestMotionPermissionIfNeeded() {
+    var DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === "function") {
+      return DOE.requestPermission();
+    }
+    return Promise.resolve("granted"); // non-iOS browsers don't gate this
+  }
+
+  elStartBtn.addEventListener("click", function () {
+    elStartBtn.disabled = true;
+    elPermissionErr.style.display = "none";
+
+    Promise.all([requestMicStream(), requestMotionPermissionIfNeeded()])
+      .then(function (results) {
+        var motionPermission = results[1];
+        if (motionPermission !== "granted") {
+          throw new Error("Motion sensor permission was not granted.");
+        }
+        elStartOverlay.classList.add("hidden");
+        startSpeechRecognition();
+        showIdleUI();
+      })
+      .catch(function (err) {
+        elStartBtn.disabled = false;
+        elPermissionErr.textContent =
+          "Permission error: " + err.message + " Please allow microphone and motion access and try again.";
+        elPermissionErr.style.display = "block";
+      });
+  });
+
+  // Expose for manual debugging from the console if needed.
+  window.__taraveeh = {
+    enterActiveState: enterActiveState,
+    exitActiveState: exitActiveState,
+    getState: function () { return appState; }
+  };
+
+})();
+</script>
+
+</body>
+</html>
